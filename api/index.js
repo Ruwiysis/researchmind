@@ -3,26 +3,37 @@ import Groq from "groq-sdk";
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const MODEL = "llama-3.3-70b-versatile";
 
-function truncate(text, max = 6000) {
+function truncate(text, max = 3000) {
   return text.length > max ? text.slice(0, max) + "\n...[truncated]" : text;
 }
 
 function docsContext(docs) {
   return docs
-    .map(
-      (d, i) =>
-        `=== DOCUMENT ${i + 1}: ${d.name} ===\n${truncate(d.content, 5000)}`
-    )
+    .map((d, i) => `=== DOCUMENT ${i + 1}: ${d.name} ===\n${truncate(d.content, 2500)}`)
     .join("\n\n");
 }
 
-async function chat(messages, jsonMode = false) {
+function extractJSON(text) {
+  // Try direct parse first
+  try { return JSON.parse(text); } catch {}
+  // Strip markdown code fences
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) { try { return JSON.parse(fenced[1]); } catch {} }
+  // Find first { ... } block
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start !== -1 && end !== -1) {
+    try { return JSON.parse(text.slice(start, end + 1)); } catch {}
+  }
+  throw new Error("Could not parse JSON from response");
+}
+
+async function chat(messages) {
   const res = await groq.chat.completions.create({
     model: MODEL,
     messages,
     temperature: 0.3,
     max_tokens: 4096,
-    ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
   });
   return res.choices[0].message.content;
 }
@@ -32,59 +43,39 @@ export async function POST_research(req) {
   const { query, documents } = req;
   const ctx = docsContext(documents);
 
-  const content = await chat(
-    [
-      {
-        role: "system",
-        content: `You are an expert research agent. Analyze the provided documents carefully and respond ONLY with valid JSON.
-Return this exact shape:
-{
-  "answer": "multi-paragraph synthesized answer with **bold** for key terms",
-  "keyInsights": ["insight 1", "insight 2", "insight 3"],
-  "themes": ["theme 1", "theme 2"],
-  "citations": [{"doc": "doc name", "excerpt": "short quote", "relevance": "why this is cited"}],
-  "confidence": "high|medium|low",
-  "docsUsed": <number>
-}`,
-      },
-      {
-        role: "user",
-        content: `Documents:\n${ctx}\n\nResearch Query: ${query}`,
-      },
-    ],
-    true
-  );
-  return JSON.parse(content);
+  const content = await chat([
+    {
+      role: "system",
+      content: `You are an expert research agent. Analyze documents and respond with a JSON object.
+IMPORTANT: Output ONLY raw JSON, no markdown, no explanation.
+Schema: {"answer":"string","keyInsights":["string"],"themes":["string"],"citations":[{"doc":"string","excerpt":"string","relevance":"string"}],"confidence":"high|medium|low","docsUsed":number}
+Keep each field concise. Max 3 citations. Max 3 insights. Max 2 themes.`,
+    },
+    {
+      role: "user",
+      content: `Documents:\n${ctx}\n\nQuery: ${query}\n\nRespond with JSON only.`,
+    },
+  ]);
+  return extractJSON(content);
 }
 
 // ── /api/compare ──
 export async function POST_compare(req) {
   const { docA, docB, topic } = req;
 
-  const content = await chat(
-    [
-      {
-        role: "system",
-        content: `You are a document comparison expert. Compare two documents on a given topic. Respond ONLY with valid JSON:
-{
-  "aspects": [
-    {"label": "aspect name", "docA": "what doc A says", "docB": "what doc B says", "agreement": "agree|disagree|neutral"}
-  ],
-  "docAStrengths": ["strength 1", "strength 2"],
-  "docBStrengths": ["strength 1", "strength 2"],
-  "keyDifference": "the single most important difference",
-  "verdict": "overall comparative verdict paragraph"
-}
-Include 5-7 aspects.`,
-      },
-      {
-        role: "user",
-        content: `Document A (${docA.name}):\n${truncate(docA.content, 4000)}\n\nDocument B (${docB.name}):\n${truncate(docB.content, 4000)}\n\nCompare on: ${topic}`,
-      },
-    ],
-    true
-  );
-  return JSON.parse(content);
+  const content = await chat([
+    {
+      role: "system",
+      content: `You are a document comparison expert. Output ONLY raw JSON, no markdown.
+Schema: {"aspects":[{"label":"string","docA":"string","docB":"string","agreement":"agree|disagree|neutral"}],"docAStrengths":["string"],"docBStrengths":["string"],"keyDifference":"string","verdict":"string"}
+Include exactly 4 aspects. Keep all values short (under 20 words each).`,
+    },
+    {
+      role: "user",
+      content: `Doc A (${docA.name}): ${truncate(docA.content, 2000)}\n\nDoc B (${docB.name}): ${truncate(docB.content, 2000)}\n\nTopic: ${topic}\n\nJSON only.`,
+    },
+  ]);
+  return extractJSON(content);
 }
 
 // ── /api/summarize ──
@@ -92,35 +83,26 @@ export async function POST_summarize(req) {
   const { document: doc, style, focus } = req;
 
   const styleGuide = {
-    executive: "Write like a C-suite executive brief. Be decisive and concise.",
-    detailed: "Write a detailed, thorough analysis covering all major aspects.",
-    academic: "Write in academic style with formal language and structured analysis.",
-    bullet: "Emphasize bullet points and lists. Minimize prose.",
-    eli5: "Explain like I'm 5 years old. Use simple words and analogies.",
+    executive: "Be decisive and concise like a C-suite brief.",
+    detailed: "Be thorough and cover all major aspects.",
+    academic: "Use formal academic language.",
+    bullet: "Favor lists and bullet points.",
+    eli5: "Use simple words and analogies for a 5-year-old.",
   };
 
-  const content = await chat(
-    [
-      {
-        role: "system",
-        content: `You are a world-class document summarizer. ${styleGuide[style] || ""} Respond ONLY with valid JSON:
-{
-  "tldr": "one-sentence summary",
-  "keyPoints": ["point 1", "point 2", "point 3", "point 4", "point 5"],
-  "themes": ["theme 1", "theme 2", "theme 3"],
-  "terminology": ["term1", "term2", "term3", "term4", "term5"],
-  "wordCount": "approx word count string e.g. '2,400 words'",
-  "readingTime": "e.g. '10 min'"
-}`,
-      },
-      {
-        role: "user",
-        content: `Summarize this document${focus ? ` focusing on: ${focus}` : ""}:\n\n${truncate(doc.content, 8000)}`,
-      },
-    ],
-    true
-  );
-  return JSON.parse(content);
+  const content = await chat([
+    {
+      role: "system",
+      content: `You are a document summarizer. ${styleGuide[style] || ""} Output ONLY raw JSON, no markdown.
+Schema: {"tldr":"string","keyPoints":["string","string","string","string","string"],"themes":["string","string"],"terminology":["string","string","string","string"],"wordCount":"string","readingTime":"string"}
+Keep each point under 15 words.`,
+    },
+    {
+      role: "user",
+      content: `Summarize${focus ? ` (focus: ${focus})` : ""}:\n\n${truncate(doc.content, 4000)}\n\nJSON only.`,
+    },
+  ]);
+  return extractJSON(content);
 }
 
 // ── /api/chat ──
@@ -131,9 +113,9 @@ export async function POST_chat(req) {
   const messages = [
     {
       role: "system",
-      content: `You are ResearchMind, an expert AI research assistant. You have access to the following documents:\n\n${ctx}\n\nAnswer questions about these documents accurately and helpfully. Cite document names when relevant. Be conversational but precise.`,
+      content: `You are ResearchMind, an AI research assistant. Documents available:\n\n${ctx}\n\nAnswer questions helpfully. Cite document names when relevant.`,
     },
-    ...history.slice(-8),
+    ...history.slice(-6),
     { role: "user", content: message },
   ];
 
@@ -146,28 +128,19 @@ export async function POST_extract_topics(req) {
   const { documents } = req;
   const ctx = docsContext(documents);
 
-  const content = await chat(
-    [
-      {
-        role: "system",
-        content: `Analyze documents and extract key topics. Respond ONLY with valid JSON:
-{
-  "topics": [
-    {"name": "topic name", "frequency": "high|medium|low", "docs": ["doc names that cover this topic"], "description": "brief description"}
-  ],
-  "overallTheme": "the unifying theme across all documents",
-  "suggestedQueries": ["question 1", "question 2", "question 3"]
-}
-Include 5-8 topics.`,
-      },
-      {
-        role: "user",
-        content: `Analyze these documents:\n${ctx}`,
-      },
-    ],
-    true
-  );
-  return JSON.parse(content);
+  const content = await chat([
+    {
+      role: "system",
+      content: `Extract key topics from documents. Output ONLY raw JSON, no markdown.
+Schema: {"topics":[{"name":"string","frequency":"high|medium|low","docs":["string"],"description":"string"}],"overallTheme":"string","suggestedQueries":["string","string","string"]}
+Include exactly 5 topics. Keep descriptions under 15 words.`,
+    },
+    {
+      role: "user",
+      content: `Documents:\n${ctx}\n\nJSON only.`,
+    },
+  ]);
+  return extractJSON(content);
 }
 
 // ── /api/timeline ──
@@ -175,27 +148,17 @@ export async function POST_timeline(req) {
   const { documents } = req;
   const ctx = docsContext(documents);
 
-  const content = await chat(
-    [
-      {
-        role: "system",
-        content: `Extract a chronological timeline of events, dates, and milestones from the documents. Respond ONLY with valid JSON:
-{
-  "events": [
-    {"date": "date or period", "event": "what happened", "doc": "source document", "importance": "high|medium|low"}
-  ],
-  "earliestDate": "earliest date found",
-  "latestDate": "latest date found",
-  "summary": "overall timeline summary"
-}
-Sort events chronologically. Include up to 15 events.`,
-      },
-      {
-        role: "user",
-        content: `Extract timeline from:\n${ctx}`,
-      },
-    ],
-    true
-  );
-  return JSON.parse(content);
+  const content = await chat([
+    {
+      role: "system",
+      content: `Extract chronological events from documents. Output ONLY raw JSON, no markdown.
+Schema: {"events":[{"date":"string","event":"string","doc":"string","importance":"high|medium|low"}],"earliestDate":"string","latestDate":"string","summary":"string"}
+Include up to 8 events. Keep event descriptions under 15 words.`,
+    },
+    {
+      role: "user",
+      content: `Documents:\n${ctx}\n\nJSON only.`,
+    },
+  ]);
+  return extractJSON(content);
 }
