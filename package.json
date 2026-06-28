@@ -1,0 +1,19 @@
+{
+  "name": "researchmind-ai",
+  "version": "1.0.0",
+  "description": "Agentic Multi-Document Research and Q&A Assistant powered by Groq",
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  },
+  "dependencies": {
+    "groq-sdk": "^0.12.0"
+  },
+  "devDependencies": {
+    "vercel": "^37.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
