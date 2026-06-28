@@ -469,12 +469,12 @@ footer span{color:var(--violet-light)}
         <p>Drag & drop or click to browse your files</p>
         <button class="upload-btn" onclick="event.stopPropagation();document.getElementById('fileInput').click()">📂 Browse Files</button>
         <div class="formats">
-          <span class="format-tag">.pdf</span>
-          <span class="format-tag">.txt</span>
-          <span class="format-tag">.md</span>
-          <span class="format-tag">.csv</span>
+          <span class="format-tag">.txt ✓</span>
+          <span class="format-tag">.md ✓</span>
+          <span class="format-tag">.csv ✓</span>
+          <span class="format-tag">.pdf ✗ convert to .txt</span>
         </div>
-        <input type="file" id="fileInput" multiple accept=".txt,.md,.csv,.pdf" onchange="handleFiles(this.files)"/>
+        <input type="file" id="fileInput" multiple accept=".txt,.md,.csv" onchange="handleFiles(this.files)"/>
       </div>
 
       <div id="docsSection" style="display:none">
@@ -765,20 +765,37 @@ function dragLeave() { document.getElementById('uploadZone').classList.remove('d
 function dropFiles(e) { e.preventDefault(); dragLeave(); handleFiles(e.dataTransfer.files); }
 
 async function handleFiles(files) {
+  const errors = [];
   for(const file of files) {
     if(docs.find(d => d.name === file.name)) continue;
-    const content = await readFile(file);
-    docs.push({ id: Date.now() + Math.random(), name: file.name, content, type: file.name.split('.').pop().toLowerCase(), size: file.size, selected: true });
+    try {
+      const content = await readFile(file);
+      docs.push({ id: Date.now() + Math.random(), name: file.name, content, type: file.name.split('.').pop().toLowerCase(), size: file.size, selected: true });
+    } catch(err) { errors.push(err.message); }
   }
   renderDocs();
   updateDocSelects();
   updateChatDocBar();
+  if(errors.length) { document.getElementById('docsSection').style.display='block'; document.getElementById('emptyState').style.display='none'; showError('researchError', errors.join(' | ')); }
 }
 
 function readFile(file) {
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
+    if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      reject(new Error(`"${file.name}" is a PDF. Please convert it to .txt first — copy the text content into a .txt file.`));
+      return;
+    }
     const r = new FileReader();
-    r.onload = e => resolve(e.target.result);
+    r.onload = e => {
+      const text = e.target.result;
+      // Detect binary/garbled content
+      if (text.slice(0, 10).includes('%PDF') || (text.match(/[^\x09\x0A\x0D\x20-\x7E]/g) || []).length > text.length * 0.1) {
+        reject(new Error(`"${file.name}" appears to be a binary file. Please use plain .txt, .md, or .csv files.`));
+        return;
+      }
+      resolve(text);
+    };
+    r.onerror = () => reject(new Error(`Failed to read "${file.name}"`));
     r.readAsText(file);
   });
 }
