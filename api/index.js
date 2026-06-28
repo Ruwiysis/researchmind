@@ -21,7 +21,7 @@ async function chat(messages, jsonMode = false) {
     model: MODEL,
     messages,
     temperature: 0.3,
-    max_tokens: 2048,
+    max_tokens: 4096,
     ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
   });
   return res.choices[0].message.content;
